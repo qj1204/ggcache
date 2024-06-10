@@ -1,4 +1,4 @@
-package ggmemcached
+package lru
 
 import "container/list"
 
