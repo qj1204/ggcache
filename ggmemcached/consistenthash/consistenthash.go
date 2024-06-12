@@ -11,7 +11,7 @@ type Hash func(data []byte) uint32
 
 // Map constains all hashed keys
 type Map struct {
-	hash     Hash
+	hash     Hash           // 哈希函数
 	replicas int            // 虚拟节点倍数
 	keys     []int          // 哈希环 keys
 	hashMap  map[int]string // 虚拟节点与真实节点的映射表，键是虚拟节点的哈希值，值是真实节点的名称
@@ -30,7 +30,7 @@ func New(replicas int, fn Hash) *Map {
 	return m
 }
 
-// Add adds some keys to the hash.
+// Add 往哈希环中添加节点（实际上添加的是虚拟节点）
 func (m *Map) Add(keys ...string) {
 	for _, key := range keys {
 		for i := 0; i < m.replicas; i++ {
@@ -42,7 +42,7 @@ func (m *Map) Add(keys ...string) {
 	sort.Ints(m.keys)
 }
 
-// Get gets the closest item in the hash to the provided key.
+// Get 获取哈希环中最接近提供的键的节点
 func (m *Map) Get(key string) string {
 	if len(m.keys) == 0 {
 		return ""

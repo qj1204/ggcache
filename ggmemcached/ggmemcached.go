@@ -6,7 +6,7 @@ import (
 	"sync"
 )
 
-// A Getter loads data for a key.
+// Getter 从数据源获取数据，并且将获取的数据添加到缓存中
 type Getter interface {
 	Get(key string) ([]byte, error)
 }
@@ -20,17 +20,26 @@ func (f GetterFunc) Get(key string) ([]byte, error) {
 	return f(key)
 }
 
-// A Group is a cache namespace and associated data loaded spread over
+// Group 控制中心，负责与用户交互，控制缓存存储和获取的流程
 type Group struct {
 	name      string // 缓存的命名空间
 	getter    Getter // 缓存未命中时获取源数据的回调
 	mainCache cache  // 并发缓存
+	peers     PeerPicker
 }
 
 var (
 	mu     sync.RWMutex
 	groups = make(map[string]*Group)
 )
+
+// RegisterPeers registers a PeerPicker for choosing remote peer
+func (g *Group) RegisterPeers(peers PeerPicker) {
+	if g.peers != nil {
+		panic("RegisterPeerPicker called more than once")
+	}
+	g.peers = peers
+}
 
 // NewGroup create a new instance of Group
 func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
@@ -48,8 +57,7 @@ func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
 	return g
 }
 
-// GetGroup returns the named group previously created with NewGroup, or
-// nil if there's no such group.
+// GetGroup returns the named group previously created with NewGroup, or nil if there's no such group.
 func GetGroup(name string) *Group {
 	mu.RLock()
 	g := groups[name]
@@ -57,7 +65,7 @@ func GetGroup(name string) *Group {
 	return g
 }
 
-// Get value for a key from cache
+// Get 实现了Getter接口，从缓存中查找缓存数据，如果不存在则调用 load 方法获取
 func (g *Group) Get(key string) (ByteView, error) {
 	if key == "" {
 		return ByteView{}, fmt.Errorf("key is required")
@@ -72,15 +80,30 @@ func (g *Group) Get(key string) (ByteView, error) {
 }
 
 func (g *Group) load(key string) (value ByteView, err error) {
+	if g.peers != nil {
+		if peer, ok := g.peers.PickPeer(key); ok {
+			if value, err = g.getFromPeer(peer, key); err == nil {
+				return value, nil
+			}
+			log.Println("[ggmemcached] Failed to get from peer", err)
+		}
+	}
 	return g.getLocally(key)
+}
+
+func (g *Group) getFromPeer(peer PeerGetter, key string) (ByteView, error) {
+	bytes, err := peer.Get(g.name, key)
+	if err != nil {
+		return ByteView{}, err
+	}
+	return ByteView{b: bytes}, nil
 }
 
 // getLocally 调用用户回调函数 g.getter.Get() 获取源数据，并且将源数据添加到缓存 mainCache 中（通过 populateCache 方法）
 func (g *Group) getLocally(key string) (ByteView, error) {
-	bytes, err := g.getter.Get(key)
+	bytes, err := g.getter.Get(key) // 实际上就是执行GetterFunc函数
 	if err != nil {
 		return ByteView{}, err
-
 	}
 	value := ByteView{b: cloneBytes(bytes)}
 	g.populateCache(key, value)

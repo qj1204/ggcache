@@ -2,30 +2,40 @@ package ggmemcached
 
 import (
 	"fmt"
+	"ggmemcached/consistenthash"
+	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 )
 
-const defaultBasePath = "/_ggmemcached/"
+const (
+	defaultBasePath = "/_ggmemcached/"
+	defaultReplicas = 50
+)
 
 // HTTPPool implements PeerPicker for a pool of HTTP peers.
 type HTTPPool struct {
-	self     string // 记录自己的地址, e.g. "https://example.net:8000"
-	basePath string // 节点间通讯地址的前缀
+	selfAddr    string                 // 记录自己的地址, e.g. "http://localhost:8001"
+	basePath    string                 // 节点间通讯地址的前缀
+	mu          sync.Mutex             // guards peers and httpGetters
+	peers       *consistenthash.Map    // 一致性哈希算法的实例
+	httpGetters map[string]*httpGetter // 每一个远程节点地址对应一个 httpGetter
 }
 
 // NewHTTPPool initializes an HTTP pool of peers.
-func NewHTTPPool(self string) *HTTPPool {
+func NewHTTPPool(selfAddr string) *HTTPPool {
 	return &HTTPPool{
-		self:     self,
+		selfAddr: selfAddr,
 		basePath: defaultBasePath,
 	}
 }
 
 // Log info with server name
 func (p *HTTPPool) Log(format string, v ...interface{}) {
-	log.Printf("[Server %s] %s", p.self, fmt.Sprintf(format, v...))
+	log.Printf("[Server %s] %s", p.selfAddr, fmt.Sprintf(format, v...))
 }
 
 // ServeHTTP handle all http requests
@@ -42,14 +52,12 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	groupName := parts[0]
-	key := parts[1]
-
 	group := GetGroup(groupName)
 	if group == nil {
 		http.Error(w, "no such group: "+groupName, http.StatusNotFound)
 		return
 	}
-
+	key := parts[1]
 	view, err := group.Get(key)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -59,3 +67,59 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(view.ByteSlice())
 }
+
+// httpGetter HTTP客户端结构体
+type httpGetter struct {
+	baseURL string
+}
+
+// Get 通过http客户端获取远程节点数据
+func (h *httpGetter) Get(group string, key string) ([]byte, error) {
+	u := fmt.Sprintf(
+		"%v%v/%v",
+		h.baseURL, // e.g. "http://localhost:8001/_ggmemcached/"
+		url.QueryEscape(group),
+		url.QueryEscape(key),
+	)
+	res, err := http.Get(u)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned: %v", res.Status)
+	}
+
+	bytes, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response body: %v", err)
+	}
+
+	return bytes, nil
+}
+
+// Set 实例化一致性哈希算法，并添加传入的节点
+func (p *HTTPPool) Set(peers ...string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.peers = consistenthash.New(defaultReplicas, nil)
+	p.peers.Add(peers...)
+	p.httpGetters = make(map[string]*httpGetter, len(peers))
+	for _, peer := range peers {
+		p.httpGetters[peer] = &httpGetter{baseURL: peer + p.basePath}
+	}
+}
+
+// PickPeer 根据具体的 key 选择节点，返回节点对应的 HTTP 客户端
+func (p *HTTPPool) PickPeer(key string) (PeerGetter, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if peer := p.peers.Get(key); peer != "" && peer != p.selfAddr {
+		p.Log("Pick peer %s", peer)
+		return p.httpGetters[peer], true
+	}
+	return nil, false
+}
+
+var _ PeerPicker = (*HTTPPool)(nil)
