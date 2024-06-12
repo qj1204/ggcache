@@ -27,11 +27,11 @@ func createGroup() *ggmemcached.Group {
 }
 
 func startCacheServer(addr string, addrs []string, group *ggmemcached.Group) {
-	HTTPPool := ggmemcached.NewHTTPPool(addr)
-	HTTPPool.Set(addrs...)
-	group.RegisterPeers(HTTPPool)
+	httpPool := ggmemcached.NewHTTPPool(addr)
+	httpPool.Set(addrs...)
+	group.RegisterPeers(httpPool)
 	log.Println("ggmemcached is running at", addr)
-	log.Fatal(http.ListenAndServe(addr[7:], HTTPPool))
+	log.Fatal(http.ListenAndServe(addr[7:], httpPool))
 }
 
 func startAPIServer(apiAddr string, group *ggmemcached.Group) {
@@ -49,7 +49,15 @@ func startAPIServer(apiAddr string, group *ggmemcached.Group) {
 	log.Fatal(http.ListenAndServe(apiAddr[7:], nil))
 }
 
-func main() {
+func startCacheServerGrpc(addr string, addrs []string, group *ggmemcached.Group) {
+	grpcPool := ggmemcached.NewGrpcPool(addr)
+	grpcPool.Set(addrs...)
+	group.RegisterPeers(grpcPool)
+	log.Println("geecache is running at", addr)
+	grpcPool.Run()
+}
+
+func startGRPCServer() {
 	var port int
 	var api bool
 	flag.IntVar(&port, "port", 8001, "ggmemcached server port")
@@ -58,9 +66,9 @@ func main() {
 
 	apiAddr := "http://localhost:9999"
 	addrMap := map[int]string{
-		8001: "http://localhost:8001",
-		8002: "http://localhost:8002",
-		8003: "http://localhost:8003",
+		8001: ":8001",
+		8002: ":8002",
+		8003: ":8003",
 	}
 
 	var addrs []string
@@ -72,5 +80,33 @@ func main() {
 	if api {
 		go startAPIServer(apiAddr, group)
 	}
-	startCacheServer(addrMap[port], addrs, group)
+	startCacheServerGrpc(addrMap[port], addrs, group)
+}
+
+func main() {
+	//var port int
+	//var api bool
+	//flag.IntVar(&port, "port", 8001, "ggmemcached server port")
+	//flag.BoolVar(&api, "api", false, "Start a api server?")
+	//flag.Parse()
+	//
+	//apiAddr := "http://localhost:9999"
+	//addrMap := map[int]string{
+	//	8001: "http://localhost:8001",
+	//	8002: "http://localhost:8002",
+	//	8003: "http://localhost:8003",
+	//}
+	//
+	//var addrs []string
+	//for _, v := range addrMap {
+	//	addrs = append(addrs, v)
+	//}
+	//
+	//group := createGroup()
+	//if api {
+	//	go startAPIServer(apiAddr, group)
+	//}
+	//startCacheServer(addrMap[port], addrs, group)
+
+	startGRPCServer()
 }
