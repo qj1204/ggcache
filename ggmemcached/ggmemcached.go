@@ -2,6 +2,7 @@ package ggmemcached
 
 import (
 	"fmt"
+	"ggmemcached/singleflight"
 	"log"
 	"sync"
 )
@@ -26,6 +27,7 @@ type Group struct {
 	getter    Getter // 缓存未命中时获取源数据的回调
 	mainCache cache  // 并发缓存
 	peers     PeerPicker
+	loader    *singleflight.Group // use singleflight.Group to make sure that each key is only fetched once
 }
 
 var (
@@ -52,6 +54,7 @@ func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
 		name:      name,
 		getter:    getter,
 		mainCache: cache{cacheBytes: cacheBytes},
+		loader:    &singleflight.Group{},
 	}
 	groups[name] = g
 	return g
@@ -75,20 +78,26 @@ func (g *Group) Get(key string) (ByteView, error) {
 		log.Println("[ggmemcached] hit")
 		return v, nil
 	}
-
 	return g.load(key)
 }
 
 func (g *Group) load(key string) (value ByteView, err error) {
-	if g.peers != nil {
-		if peer, ok := g.peers.PickPeer(key); ok {
-			if value, err = g.getFromPeer(peer, key); err == nil {
-				return value, nil
+	// 无论并发调用者的数量如何，每个键只被获取一次(本地或远程)
+	viewi, err := g.loader.Do(key, func() (any, error) {
+		if g.peers != nil {
+			if peer, ok := g.peers.PickPeer(key); ok {
+				if value, err = g.getFromPeer(peer, key); err == nil {
+					return value, nil
+				}
+				log.Println("[ggmemcached] Failed to get from peer", err)
 			}
-			log.Println("[ggmemcached] Failed to get from peer", err)
 		}
+		return g.getLocally(key)
+	})
+	if err == nil {
+		return viewi.(ByteView), nil
 	}
-	return g.getLocally(key)
+	return
 }
 
 func (g *Group) getFromPeer(peer PeerGetter, key string) (ByteView, error) {
